@@ -6,6 +6,7 @@ import xml.etree.ElementTree as et
 
 import FreeCAD as fc
 
+from .freecad_utils import ProxyBase
 from .freecad_utils import add_property
 from .freecad_utils import error
 from .freecad_utils import is_link as is_freecad_link
@@ -15,6 +16,7 @@ from .urdf_utils import XmlForExport
 from .urdf_utils import urdf_collision_from_object
 from .urdf_utils import urdf_visual_from_object
 from .utils import warn_unsupported
+from .wb_utils import ICON_PATH
 from .wb_utils import get_joints
 from .wb_utils import get_valid_urdf_name
 from .wb_utils import is_joint
@@ -89,7 +91,7 @@ def _get_xmls_and_export_meshes(
     return xmls
 
 
-class Link:
+class Link(ProxyBase):
     """Proxy for ROS links."""
 
     # The member is often used in workbenches, particularly in the Draft
@@ -97,6 +99,15 @@ class Link:
     Type = 'Ros::Link'
 
     def __init__(self, obj: RosLink):
+        super().__init__('link', [
+            'Collision',
+            'Group',
+            'MountedPlacement',
+            'Placement',
+            'Real',
+            'Visual',
+            '_Type',
+            ])
         obj.Proxy = self
         self.link = obj
         self.init_properties(obj)
@@ -127,7 +138,7 @@ class Link:
         # This placement is the transform from origin to the location of the
         # joint that is parent of this link.
         add_property(obj, 'App::PropertyPlacement', 'MountedPlacement',
-                     'Internal', 'Placement when building')
+                     'ROS Parameters', 'Shapes placement')
 
     def init_extensions(self, obj: RosLink) -> None:
         # Need a group to put the generated FreeCAD links in.
@@ -161,8 +172,7 @@ class Link:
     def cleanup_children(self) -> DOList:
         """Remove and return all objects not supported by ROS::Link."""
 
-        if ((not hasattr(self, 'link'))
-                or (not is_link(self.link))):
+        if not self.is_ready():
             return
         removed_objects: set[DO] = set()
         # Group is managed by us and the containing robot.
@@ -175,36 +185,32 @@ class Link:
             # and `o` exists even if already removed from the group.
             removed_objects.update(self.link.removeObject(o))
 
-        # Clean-up `Visual`, `Real`, `Collision`.
-        try:
-            kept, removed = _skim_links_joints_from(self.link.Real)
-            if self.link.Real != kept:
-                self.link.Real = kept
-            warn_unsupported(removed, by='ROS::Link', gui=True)
-            removed_objects.update(removed)
-        except AttributeError:
-            pass
-        try:
-            kept, removed = _skim_links_joints_from(self.link.Visual)
-            if self.link.Visual != kept:
-                self.link.Visual = kept
-            warn_unsupported(removed, by='ROS::Link', gui=True)
-            removed_objects.update(removed)
-        except AttributeError:
-            pass
-        try:
-            kept, removed = _skim_links_joints_from(self.link.Collision)
-            if self.link.Collision != kept:
-                self.link.Collision = kept
-            warn_unsupported(removed, by='ROS::Link', gui=True)
-            removed_objects.update(removed)
-        except AttributeError:
-            pass
+        # Clean-up `Real`.
+        kept, removed = _skim_links_joints_from(self.link.Real)
+        if self.link.Real != kept:
+            self.link.Real = kept
+        warn_unsupported(removed, by='ROS::Link', gui=True)
+        removed_objects.update(removed)
+
+        # Clean-up `Visual.
+        kept, removed = _skim_links_joints_from(self.link.Visual)
+        if self.link.Visual != kept:
+            self.link.Visual = kept
+        warn_unsupported(removed, by='ROS::Link', gui=True)
+        removed_objects.update(removed)
+
+        # Clean-up `Collision`.
+        kept, removed = _skim_links_joints_from(self.link.Collision)
+        if self.link.Collision != kept:
+            self.link.Collision = kept
+        warn_unsupported(removed, by='ROS::Link', gui=True)
+        removed_objects.update(removed)
+
         return list(removed_objects)
 
     def get_robot(self) -> Optional[RosRobot]:
         """Return the Ros::Robot this link belongs to."""
-        if not hasattr(self, 'link'):
+        if not self.is_ready():
             return
         for o in self.link.InList:
             if is_robot(o):
@@ -274,17 +280,22 @@ class Link:
         return link_xml
 
 
-class _ViewProviderLink:
+class _ViewProviderLink(ProxyBase):
     """A view provider for the Ros::Link object """
 
     def __init__(self, vobj: VPDO):
+        super().__init__('view_object', [
+            'Visibility',
+            ])
         vobj.Proxy = self
 
     def getIcon(self):
-        return 'link.svg'
+        # Implementation note: "return 'link.svg'" works only after
+        # workbench activation in GUI.
+        return str(ICON_PATH / 'link.svg')
 
     def attach(self, vobj: VPDO):
-        self.ViewObject = vobj
+        self.view_object = vobj
         vobj.addExtension('Gui::ViewProviderGroupExtensionPython')
 
     def updateData(self, obj: VPDO, prop):

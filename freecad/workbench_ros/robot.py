@@ -7,17 +7,25 @@ import xml.etree.ElementTree as et
 
 import FreeCAD as fc
 
+from . import wb_globals
+from .freecad_utils import ProxyBase
 from .freecad_utils import add_property
 from .freecad_utils import error
 from .freecad_utils import get_properties_of_category
 from .freecad_utils import get_valid_property_name
+from .freecad_utils import is_origin
 from .freecad_utils import label_or
+from .freecad_utils import message
 from .freecad_utils import warn
+from .ros_utils import get_ros_workspace_from_file
 from .ros_utils import split_package_path
+from .ros_utils import without_ros_workspace
 from .utils import get_valid_filename
 from .utils import grouper
 from .utils import save_xml
 from .utils import warn_unsupported
+from .wb_gui_utils import get_ros_workspace
+from .wb_utils import ICON_PATH
 from .wb_utils import export_templates
 from .wb_utils import get_chains
 from .wb_utils import get_joints
@@ -148,7 +156,7 @@ def _add_joint_variable(
     return used_var_name
 
 
-class Robot:
+class Robot(ProxyBase):
     """The Robot proxy."""
 
     # The member is often used in workbenches, particularly in the Draft
@@ -160,10 +168,27 @@ class Robot:
     _category_of_joint_values = 'JointValues'
 
     def __init__(self, obj: RosRobot):
+        # Implementation note: 'Group' is not required because
+        # DocumentObjectGroupPython.
+        super().__init__('robot', [
+            'OutputPath',
+            '_Type',
+            ])
         obj.Proxy = self
         self.robot = obj
 
+        # List of objects created for the robot.
+        # Used for example by `robot_from_urdf` to keep track of imported
+        # meshes.
+        # This class doesn't add any object to this list itself.
+        self._created_objects: DOList = []
+
         self.init_properties(obj)
+
+    @property
+    def created_objects(self) -> DOList:
+        """Return the list of objects created for the robot."""
+        return self._created_objects
 
     def init_properties(self, obj: RosRobot):
         add_property(obj, 'App::PropertyString', '_Type', 'Internal',
@@ -175,25 +200,26 @@ class Robot:
         obj.setPropertyStatus('Group', 'ReadOnly')
 
         add_property(obj, 'App::PropertyPath', 'OutputPath', 'Export',
-                     'The path to the ROS package to export files to')
+                     'The path to the ROS package to export files to,'
+                     ' relative to $ROS_WORKSPACE/src')
 
     def execute(self, obj: RosRobot) -> None:
         self.cleanup_group()
         self.set_joint_enum()
         self.add_joint_variables()
         self.compute_poses()
-        self._fix_lost_fc_links()
         self.reset_group()
 
     def onChanged(self, obj: RosRobot, prop: str) -> None:
         if prop in ['Group']:
             self.execute(obj)
+        if prop == 'OutputPath':
+            self._remove_ros_workspace(obj)
 
     def onDocumentRestored(self, obj):
         """Restore attributes because __init__ is not called on restore."""
-        obj.Proxy = self
-        self.robot = obj
-        self.init_properties(obj)
+        self.__init__(obj)
+        self._fix_lost_fc_links()
 
     def __getstate__(self):
         return self.Type,
@@ -218,7 +244,7 @@ class Robot:
                     new_link_placement = placement * link.MountedPlacement
                 else:
                     # TODO: find out why `MountedPlacement` is not set.
-                    new_link_placement = link.placement
+                    new_link_placement = link.Placement
                 if link.Placement != new_link_placement:
                     # Avoid recursive recompute.
                     link.Placement = new_link_placement
@@ -232,12 +258,12 @@ class Robot:
                                  * joint.Proxy.get_actuation_placement())
 
     def get_links(self) -> list[RosLink]:
-        if ((not hasattr(self, 'robot')) or (not hasattr(self.robot, 'Group'))):
+        if not self.is_ready():
             return []
         return get_links(self.robot.Group)
 
     def get_joints(self) -> list[RosJoint]:
-        if ((not hasattr(self, 'robot')) or (not hasattr(self.robot, 'Group'))):
+        if not self.is_ready():
             return []
         return get_joints(self.robot.Group)
 
@@ -258,7 +284,7 @@ class Robot:
                 return joint
 
     def get_chains(self) -> list[DOList]:
-        if not hasattr(self, 'robot'):
+        if not self.is_ready():
             return []
         if not is_robot(self.robot):
             warn(f'{label_or(self.robot)} is not a ROS::Robot', True)
@@ -268,11 +294,9 @@ class Robot:
         return get_chains(links, joints)
 
     def reset_group(self) -> None:
-        if ((not hasattr(self, 'robot'))
-                or (not hasattr(self.robot, 'ViewObject'))
-                or (not hasattr(self.robot.ViewObject, 'ShowReal'))
-                or (not hasattr(self.robot.ViewObject, 'ShowVisual'))
-                or (not hasattr(self.robot.ViewObject, 'ShowCollision'))):
+        if ((not self.is_ready())
+                or (not hasattr(self.robot.ViewObject, 'Proxy'))
+                or (not self.robot.ViewObject.Proxy.is_ready())):
             return
 
         links = self.get_links()  # ROS links.
@@ -301,7 +325,7 @@ class Robot:
         objects_to_remove = set(current_linked_objects) - set(all_linked_objects)
         for o in objects_to_remove:
             self.robot.Document.removeObject(o.Name)
-        # TODO?: doc.recompute() if objects_to_remove or (set(current_linked_objects) != set(all_linked_objects))
+        # TODO?: doc.recompute() if objects_to_remove or (set(current_linked_objects)!= set(all_linked_objects))
 
     def cleanup_group(self) -> DO:
         """Remove the last object not supported by ROS::Robot.
@@ -310,8 +334,7 @@ class Robot:
         the remaining unsupported objects.
 
         """
-        if ((not hasattr(self, 'robot'))
-                or (not is_robot(self.robot))):
+        if (not self.is_ready()):
             return
         for o in self.robot.Group[::-1]:
             if is_link(o) or is_joint(o):
@@ -319,6 +342,54 @@ class Robot:
                 continue
             warn_unsupported(o, by='ROS::Robot', gui=True)
             return self.robot.removeObject(o)
+
+    def is_exclusive_to_robot(self, obj: DO) -> bool:
+        """Return True if `obj` was created for the Robot."""
+        if not self.is_ready():
+            return False
+
+        # Special case for Origin objects that are auto-generated by FreeCAD.
+        if is_origin(obj):
+            return self.is_exclusive_to_robot(obj.InList[0])
+
+        show_objects: DOList = []
+        for link in self.get_links():
+            if not link.Proxy.is_ready():
+                continue
+            for o in link.Group:
+                show_objects.append(o)
+        robot_objects = (self.get_links()
+                         + self.get_joints()
+                         + self.created_objects
+                         + show_objects)
+        return (obj in robot_objects) and len(set(obj.InList) - set(robot_objects)) == 0
+
+    def delete_created_objects(self) -> None:
+        """Delete all objects created for the Robot object.
+
+        Objects that are used somewhere else should not be deleted but they are
+        removed from `created_objects`.
+
+        Calling this method may create broken links in FreeCAD links added for
+        the Real, Visual, and Collision objects. Setting Robot.ViewObject.ShowReal
+        and similars to False fixes the issue (deletes the objects) and should
+        ideally be done before calling this method.
+
+        This methods does not use any FreeCAD transaction.
+
+        """
+        for obj in self.created_objects[::-1]:
+            try:
+                name = obj.Name
+            except RuntimeError:
+                # Already deleted.
+                continue
+            if (self.is_exclusive_to_robot(obj)
+                    and all([self.is_exclusive_to_robot(o) for o in obj.OutList])):
+                # Object without "external" parent in the dependency graph.
+                # "External" means not in self.created_objects.
+                self.robot.Document.removeObject(name)
+        self.created_objects.clear()
 
     def set_joint_enum(self) -> None:
         """Set the enum for Child and Parent of all joints."""
@@ -340,34 +411,39 @@ class Robot:
 
     def add_joint_variables(self) -> list[str]:
         """Add a property for each actuated joint."""
+        if not self.is_ready():
+            return []
         variables: list[str] = []
-        try:
-            # Get all old variables.
-            old_vars: set[str] = set(get_properties_of_category(
-                self.robot,
-                self._category_of_joint_values))
-            # Add a variable for each actuated (supported) joint.
-            for joint in self.get_joints():
-                var = _add_joint_variable(self.robot, joint,
-                                          self._category_of_joint_values)
-                if var:
-                    variables.append(var)
-            # Remove obsoleted variables.
-            for p in old_vars - set(variables):
-                self.robot.removeProperty(p)
-        except AttributeError:
-            pass
+        # Get all old variables.
+        old_vars: set[str] = set(get_properties_of_category(
+            self.robot,
+            self._category_of_joint_values))
+        # Add a variable for each actuated (supported) joint.
+        for joint in self.get_joints():
+            var = _add_joint_variable(self.robot, joint,
+                                      self._category_of_joint_values)
+            if var:
+                variables.append(var)
+        # Remove obsoleted variables.
+        for p in old_vars - set(variables):
+            self.robot.removeProperty(p)
         return variables
 
     def export_urdf(self) -> Optional[et.Element]:
         """Export the robot as URDF, writing files."""
-        if ((not hasattr(self, 'robot'))
-                or (not hasattr(self.robot, 'OutputPath'))):
+        if not self.is_ready():
             return
         if not self.robot.OutputPath:
             warn('Property `OutputPath` cannot be empty', True)
             return
-        output_path = Path(self.robot.OutputPath).expanduser()
+        if not wb_globals.g_ros_workspace.name:
+            ws = get_ros_workspace()
+            wb_globals.g_ros_workspace = ws
+            p = without_ros_workspace(self.robot.OutputPath)
+            if p != self.robot.OutputPath:
+                self.robot.OutputPath = p
+        output_path = (wb_globals.g_ros_workspace.expanduser()
+                       / 'src' / self.robot.OutputPath)
         package_parent, package_name = split_package_path(output_path)
         # TODO: warn if package name doesn't end with `_description`.
         xml = et.fromstring('<robot/>')
@@ -411,13 +487,34 @@ class Robot:
                          urdf_file=urdf_file)
         return xml
 
+    def _remove_ros_workspace(self, obj) -> None:
+        """Modify `obj.OutputPath` to remove $ROS_WORKSPACE/src."""
+        rel_path = without_ros_workspace(obj.OutputPath)
+        if wb_globals.g_ros_workspace.samefile(Path()):
+            # g_ros_workspace was not defined yet.
+            ws = get_ros_workspace_from_file(
+                    obj.OutputPath)
+            if not ws.samefile(Path()):
+                # A workspace was found.
+                wb_globals.g_ros_workspace = ws
+                message('ROS workspace was set to'
+                        f' {wb_globals.g_ros_workspace},'
+                        ' change if not correct.'
+                        ' Note that packages in this workspace will NOT be'
+                        ' found, though, but only by launching FreeCAD from a'
+                        ' sourced workspace',
+                        True)
+                rel_path = without_ros_workspace(obj.OutputPath)
+        if rel_path != obj.OutputPath:
+            obj.OutputPath = rel_path
+
     def _fix_lost_fc_links(self) -> None:
         """Fix linked objects in ROS links lost on restore.
 
         Probably because these elements are restored before the ROS links.
 
         """
-        if not hasattr(self, 'robot'):
+        if not self.is_ready():
             return
         links = self.get_links()
         for obj in self.robot.Document.Objects:
@@ -433,17 +530,27 @@ class Robot:
             link.addObject(obj)
 
 
-class _ViewProviderRobot:
+class _ViewProviderRobot(ProxyBase):
     """A view provider for the Robot container object """
 
     def __init__(self, vobj: VPDO):
+        super().__init__('view_object', [
+            'JointAxisLength',
+            'ShowCollision',
+            'ShowJointAxes',
+            'ShowReal',
+            'ShowVisual',
+            'Visibility',
+            ])
         vobj.Proxy = self
 
     def getIcon(self):
-        return 'robot.svg'
+        # Implementation note: "return 'robot.svg'" works only after
+        # workbench activation in GUI.
+        return str(ICON_PATH / 'robot.svg')
 
     def attach(self, vobj: VPDO):
-        self.ViewObject = vobj
+        self.view_object = vobj
         self.robot = vobj.Object
 
         # Level of detail.

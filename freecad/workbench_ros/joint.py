@@ -6,11 +6,13 @@ import xml.etree.ElementTree as et
 
 import FreeCAD as fc
 
+from .freecad_utils import ProxyBase
 from .freecad_utils import add_property
 from .freecad_utils import error
 from .freecad_utils import label_or
 from .freecad_utils import warn
 from .urdf_utils import urdf_origin_from_placement
+from .wb_utils import ICON_PATH
 from .wb_utils import get_valid_urdf_name
 from .wb_utils import is_link
 from .wb_utils import is_robot
@@ -25,7 +27,7 @@ RosJoint = DO  # A Ros::Joint, i.e. a DocumentObject with Proxy "Joint".
 RosRobot = DO  # A Ros::Robot, i.e. a DocumentObject with Proxy "Robot".
 
 
-class Joint:
+class Joint(ProxyBase):
     """The Ros::Joint object."""
 
     # The member is often used in workbenches, particularly in the Draft
@@ -38,6 +40,23 @@ class Joint:
     type_enum = ['fixed', 'prismatic', 'revolute', 'continuous', 'planar', 'floating']
 
     def __init__(self, obj: RosJoint):
+        super().__init__('joint', [
+                'Child',
+                'Effort',
+                'LowerLimit',
+                'Mimic',
+                'MimickedJoint',
+                'Multiplier',
+                'Offset',
+                'Origin',
+                'Parent',
+                'Placement',
+                'Position',
+                'Type',
+                'UpperLimit',
+                'Velocity',
+                '_Type',
+                ])
         obj.Proxy = self
         self.joint = obj
         self.init_properties(obj)
@@ -101,9 +120,7 @@ class Joint:
                 robot.Proxy.add_joint_variables()
 
     def onDocumentRestored(self, obj: RosJoint):
-        obj.Proxy = self
-        self.joint = obj
-        self.init_properties(obj)
+        self.__init__(obj)
 
     def __getstate__(self):
         return self.Type,
@@ -121,6 +138,8 @@ class Joint:
         - joint_value: joint value in mm or deg.
 
         """
+        if not self.is_ready():
+            return fc.Placement()
         # Only actuation around/about z supported.
         if self.joint.Mimic and self.joint.MimickedJoint:
             mult = self.joint.Multiplier
@@ -153,7 +172,7 @@ class Joint:
 
     def get_robot(self) -> Optional[RosRobot]:
         """Return the Ros::Robot this joint belongs to."""
-        if not hasattr(self, 'joint'):
+        if not self.is_ready():
             return
         for o in self.joint.InList:
             if is_robot(o):
@@ -208,23 +227,27 @@ class Joint:
         return joint_xml
 
     def _toggle_editor_mode(self):
+        if not self.is_ready():
+            return
         joint = self.joint
         if joint.Mimic:
             editor_mode = []
         else:
             editor_mode = ['Hidden', 'ReadOnly']
-        if hasattr(joint, 'MimickedJoint'):
-            joint.setEditorMode('MimickedJoint', editor_mode)
-        if hasattr(joint, 'Multiplier'):
-            joint.setEditorMode('Multiplier', editor_mode)
-        if hasattr(joint, 'Offset'):
-            joint.setEditorMode('Offset', editor_mode)
+        joint.setEditorMode('MimickedJoint', editor_mode)
+        joint.setEditorMode('Multiplier', editor_mode)
+        joint.setEditorMode('Offset', editor_mode)
 
 
-class _ViewProviderJoint:
+class _ViewProviderJoint(ProxyBase):
     """A view provider for the Joint container object """
 
     def __init__(self, vobj: VPDO):
+        super().__init__('view_object', [
+            'AxisLength',
+            'ShowAxis',
+            'Visibility',
+            ])
         vobj.Proxy = self
         self.set_properties(vobj)
 
@@ -240,11 +263,13 @@ class _ViewProviderJoint:
                      500.0)
 
     def getIcon(self):
-        return 'joint.svg'
+        # Implementation note: "return 'joint.svg'" works only after
+        # workbench activation in GUI.
+        return str(ICON_PATH / 'joint.svg')
 
     def attach(self, vobj):
         """Setup the scene sub-graph of the view provider."""
-        pass
+        self.view_object = vobj
 
     def updateData(self,
                    obj: RosJoint,
@@ -255,7 +280,7 @@ class _ViewProviderJoint:
         if not vobj.Visibility or not hasattr(vobj, 'ShowAxis'):
             # root_node.removeAllChildren() # This segfaults when loading the document.
             return
-        if prop in ['Placement']:
+        if prop in ['Placement', 'Type', 'Position']:
             self.draw(vobj, vobj.Visibility and vobj.ShowAxis)
         # Implementation note: no need to react on prop == 'Origin' because
         # this triggers a change in 'Placement'.
@@ -266,6 +291,7 @@ class _ViewProviderJoint:
 
     def draw(self, vobj: VPDO, visible: bool):
         from .coin_utils import arrow_group
+        from .coin_utils import face_group
 
         if not hasattr(vobj, 'RootNode'):
             return
@@ -275,10 +301,11 @@ class _ViewProviderJoint:
             return
         if not hasattr(vobj.Object, 'Placement'):
             return
-        placement = vobj.Object.Placement
+        obj = vobj.Object
+        placement = obj.Placement
         if placement is None:
             return
-        if vobj.Object.Type == 'fixed':
+        if obj.Type == 'fixed':
             color = (0.0, 0.0, 0.7)
         else:
             color = (0.0, 0.0, 1.0)
@@ -296,6 +323,23 @@ class _ViewProviderJoint:
         py = placement * fc.Vector(0.0, length / 2.0, 0.0)
         arrow = arrow_group([p0, py], scale=0.2, color=(0.0, 1.0, 0.0))
         root_node.addChild(arrow)
+        if obj.Type == 'prismatic':
+            placement *= obj.Proxy.get_actuation_placement()
+            scale = length * 0.05
+            ps0 = placement * fc.Vector(+scale / 2.0, +scale / 2.0, 0.0)
+            ps1 = placement * fc.Vector(-scale / 2.0, +scale / 2.0, 0.0)
+            ps2 = placement * fc.Vector(-scale / 2.0, -scale / 2.0, 0.0)
+            ps3 = placement * fc.Vector(+scale / 2.0, -scale / 2.0, 0.0)
+            square = face_group([ps0, ps1, ps2, ps3], color=color)
+            root_node.addChild(square)
+        if obj.Type in ['revolute', 'continuous']:
+            placement *= obj.Proxy.get_actuation_placement()
+            scale = length * 0.2
+            pt0 = placement * fc.Vector(0.0, 0.0, 0.0)
+            pt1 = placement * fc.Vector(scale, 0.0, 0.0)
+            pt2 = placement * fc.Vector(0.0, 0.0, scale / 2.0)
+            triangle = face_group([pt0, pt1, pt2], color=color)
+            root_node.addChild(triangle)
 
     def doubleClicked(self, vobj):
         gui_doc = vobj.Document

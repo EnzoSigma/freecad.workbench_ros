@@ -10,6 +10,14 @@
 
 - [ROSCon'22](https://youtu.be/mkYRL72wiPo?list=PLXUpEXjGC63zhIdE2P9yZioRTXdkW2PFX&t=1107)
 
+# Verbotics' Cell Editor
+
+- [Cell editor](https://verbotics.com/product/cell-editor/)
+- [YouTube](https://www.youtube.com/watch?v=j0nLaukcTIo)
+- [From STEP to weld](https://verbotics.com/wp-content/uploads/2022/10/from-Step-to-Weld.mp4)
+
+Closed-source. Maybe ROS1 only. Linux support.
+
 # Workcell Builder
 
 - [Part of Easy Manipulation Deployment](https://easy-manipulation-deployment-docs.readthedocs.io/en/latest/emd_packages/workcell_builder/workcell_builder.html)
@@ -33,16 +41,16 @@
 
 # Python programming in FreeCAD
 
-- `Origin Group Extension<https://github.com/gbroques/freecad-origin-group-extension-python-example>`_
-- `Part Attachment Extension<https://github.com/gbroques/freecad-part-attachment-python-example>`_
-- `Dynamic Linked Object<https://github.com/gbroques/freecad-dynamic-linked-object>`_
-- `shape-group.py <https://gist.github.com/realthunder/40cd71a3085be666c3e2d718171de133>`_
+- [Origin Group Extension](https://github.com/gbroques/freecad-origin-group-extension-python-example)
+- [Part Attachment Extension](https://github.com/gbroques/freecad-part-attachment-python-example)
+- [Dynamic Linked Object](https://github.com/gbroques/freecad-dynamic-linked-object)
+- [shape-group.py](https://gist.github.com/realthunder/40cd71a3085be666c3e2d718171de133)
 
 # Pivy
 
-- `Examples<https://github.com/coin3d/pivy/tree/master/examples/Mentor>`_
+- [Examples](https://github.com/coin3d/pivy/tree/master/examples/Mentor)
 
 # Mesh simplification
 
-- The `V-HACD library<https://github.com/kmammou/v-hacd/>`_ decomposes a 3D surface into a set of "near" convex parts
-- `Mesh-to-SDF<https://github.com/kmammou/v-hacd/>`_ converter (uses V-HACD).
+- [The V-HACD library](https://github.com/kmammou/v-hacd/) decomposes a 3D surface into a set of "near" convex parts
+- [Mesh-to-SDF](https://github.com/kmammou/v-hacd/) converter (uses V-HACD).
